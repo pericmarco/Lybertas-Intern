@@ -2,15 +2,15 @@ import { verifySession } from '@/app/lib/auth'
 import { db } from '@/app/lib/db'
 import { logout } from '@/app/actions'
 import TodoList, { type Todo } from '@/components/TodoList'
-import KommunenKarte, { type Kommune } from '@/components/KommunenKarte'
+import KommunenKarte, { type KommuneStatusRow } from '@/components/KommunenKarte'
 
 export default async function Dashboard() {
   const session = await verifySession()
   const name = session?.name ?? ''
 
   const [{ data: todos }, { data: kommunen }] = await Promise.all([
-    db().from('todos').select('*').order('done').order('created_at', { ascending: false }),
-    db().from('kommunen').select('*').order('name'),
+    db().from('todos').select('*'),
+    db().from('kommunen_status').select('*').order('name'),
   ])
 
   return (
@@ -32,7 +32,7 @@ export default async function Dashboard() {
 
       <section>
         <h2>Kommunen</h2>
-        <KommunenKarte kommunen={(kommunen ?? []) as Kommune[]} />
+        <KommunenKarte kommunen={(kommunen ?? []) as KommuneStatusRow[]} />
       </section>
     </div>
   )

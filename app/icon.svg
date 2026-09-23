@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title>LYBERTAS L Logo</title>
+  <desc>Minimalist circular LYBERTAS logo mark with a navy L, navy outer arc, mint inner arc, and mint dot.</desc>
+
+  <rect width="1024" height="1024" fill="#ffffff"/>
+
+  <!-- Outer navy arc -->
+  <path
+    d="M 391.4 97.7
+       A 430 430 0 1 0 632.6 97.7"
+    fill="none"
+    stroke="#062B63"
+    stroke-width="66"
+    stroke-linecap="round"/>
+
+  <!-- Inner mint arc -->
+  <path
+    d="M 398.9 272.9
+       A 280 280 0 1 0 704.0 285.7"
+    fill="none"
+    stroke="#31D39A"
+    stroke-width="66"
+    stroke-linecap="round"/>
+
+  <!-- Mint dot -->
+  <circle cx="668" cy="378" r="52" fill="#31D39A"/>
+
+  <!-- Central navy L -->
+  <path
+    d="M 472 330
+       L 472 628
+       Q 472 676 520 676
+       L 650 676"
+    fill="none"
+    stroke="#062B63"
+    stroke-width="86"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+</svg>

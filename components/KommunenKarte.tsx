@@ -1,7 +1,12 @@
 'use client'
 
-import { useState, useTransition, type MouseEvent } from 'react'
-import { addKommune, updateKommune, deleteKommune } from '@/app/actions'
+import { memo, useEffect, useMemo, useOptimistic, useRef, useState, useTransition, type MouseEvent } from 'react'
+import { geoIdentity, geoPath, type GeoPermissibleObjects } from 'd3-geo'
+import { select } from 'd3-selection'
+import { zoom as d3zoom, zoomIdentity, type ZoomBehavior } from 'd3-zoom'
+import { feature, mesh } from 'topojson-client'
+import type { GeometryCollection, Topology } from 'topojson-specification'
+import { saveKommune, resetKommune, type KommuneInput } from '@/app/actions'
 
 export type KommuneStatus =
   | 'nicht_kontaktiert'
@@ -11,19 +16,19 @@ export type KommuneStatus =
   | 'kunde'
   | 'abgesagt'
 
-export type Kommune = {
-  id: string
+export type KommuneStatusRow = {
+  ags: string
   name: string
   status: KommuneStatus
-  pos_x: number
-  pos_y: number
   notes: string | null
   contact_date: string | null
   appointment_date: string | null
+  updated_by: string | null
+  updated_at: string
 }
 
 const STATUS_LABEL: Record<KommuneStatus, string> = {
-  nicht_kontaktiert: 'Noch nicht kontaktiert',
+  nicht_kontaktiert: 'Auf der Liste',
   angeschrieben: 'Angeschrieben',
   termin_vereinbart: 'Termin vereinbart',
   gespraech_gefuehrt: 'Gespräch geführt',
@@ -32,28 +37,180 @@ const STATUS_LABEL: Record<KommuneStatus, string> = {
 }
 const STATUS_ORDER = Object.keys(STATUS_LABEL) as KommuneStatus[]
 
-export default function KommunenKarte({ kommunen }: { kommunen: Kommune[] }) {
+// a = AGS, n = Name, b = Bezeichnung (Stadt/Gemeinde/…), k = Landkreis
+type GemProps = { a: string; n: string; b: string; k: string }
+type Gemeinde = GemProps & { d: string; search: string }
+type GemTopology = Topology<{ gem: GeometryCollection<GemProps> }>
+
+type MapData = {
+  gemeinden: Gemeinde[]
+  byAgs: Map<string, Gemeinde>
+  bounds: (ags: string) => [[number, number], [number, number]] | null
+  kreise: string
+  laender: string
+  outline: string
+}
+
+const W = 800
+const H = 1080
+const MAX_ZOOM = 60
+
+function norm(s: string) {
+  return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss')
+}
+
+function useMapData(): MapData | null {
+  const [data, setData] = useState<MapData | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/gemeinden.topo.json')
+      .then((r) => r.json())
+      .then((topo: GemTopology) => {
+        if (cancelled) return
+        const obj = topo.objects.gem
+        const fc = feature(topo, obj)
+        // Daten liegen schon projiziert vor (UTM 32), daher Identität statt Kartenprojektion.
+        const path = geoPath(geoIdentity().reflectY(true).fitSize([W, H], fc)).digits(1)
+        const features = new Map(fc.features.map((f) => [f.properties.a, f]))
+        const gemeinden = fc.features.map((f) => ({
+          ...f.properties,
+          d: path(f) ?? '',
+          search: norm(f.properties.n),
+        }))
+        const agsOf = (g: { properties?: unknown }) => (g.properties as GemProps).a
+        const border = (len: number) =>
+          path(mesh(topo, obj, (x, y) => x !== y && agsOf(x).slice(0, len) !== agsOf(y).slice(0, len))) ?? ''
+        setData({
+          gemeinden,
+          byAgs: new Map(gemeinden.map((g) => [g.a, g])),
+          bounds: (ags) => {
+            const f = features.get(ags)
+            return f ? path.bounds(f as GeoPermissibleObjects) : null
+          },
+          kreise: border(5),
+          laender: border(2),
+          outline: path(mesh(topo, obj, (x, y) => x === y)) ?? '',
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return data
+}
+
+// Eigene Komponente, damit Hover/Tooltip nicht alle ~11.000 Flächen neu rendern.
+const GemeindeFlaechen = memo(function GemeindeFlaechen({
+  gemeinden,
+  statusByAgs,
+}: {
+  gemeinden: Gemeinde[]
+  statusByAgs: Map<string, KommuneStatus>
+}) {
+  return (
+    <g>
+      {gemeinden.map((g) => {
+        const s = statusByAgs.get(g.a)
+        return <path key={g.a} d={g.d} data-ags={g.a} className={s ? `gem s-${s}` : 'gem'} />
+      })}
+    </g>
+  )
+})
+
+type Optimistic = { type: 'save'; row: KommuneStatusRow } | { type: 'reset'; ags: string }
+
+export default function KommunenKarte({ kommunen }: { kommunen: KommuneStatusRow[] }) {
+  const data = useMapData()
   const [, startTransition] = useTransition()
-  const [placing, setPlacing] = useState(false)
-  const [pendingPos, setPendingPos] = useState<{ x: number; y: number } | null>(null)
-  const [pendingName, setPendingName] = useState('')
-  const [selected, setSelected] = useState<Kommune | null>(null)
+  const [rows, applyOptimistic] = useOptimistic(kommunen, (current: KommuneStatusRow[], action: Optimistic) =>
+    action.type === 'save'
+      ? [...current.filter((r) => r.ags !== action.row.ags), action.row]
+      : current.filter((r) => r.ags !== action.ags)
+  )
+  const [selected, setSelected] = useState<string | null>(null)
+  const [hover, setHover] = useState<{ ags: string; x: number; y: number } | null>(null)
 
-  function handleMapClick(e: MouseEvent<HTMLDivElement>) {
-    if (!placing) return
-    const rect = e.currentTarget.getBoundingClientRect()
-    const x = (e.clientX - rect.left) / rect.width
-    const y = (e.clientY - rect.top) / rect.height
-    setPendingPos({ x, y })
+  const svgRef = useRef<SVGSVGElement>(null)
+  const gRef = useRef<SVGGElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
+
+  const rowByAgs = useMemo(() => new Map(rows.map((r) => [r.ags, r])), [rows])
+  const statusByAgs = useMemo(() => new Map(rows.map((r) => [r.ags, r.status])), [rows])
+
+  useEffect(() => {
+    if (!data || !svgRef.current || !gRef.current) return
+    const svg = select(svgRef.current)
+    const g = gRef.current
+    const z = d3zoom<SVGSVGElement, unknown>()
+      .scaleExtent([1, MAX_ZOOM])
+      .translateExtent([[0, 0], [W, H]])
+      // Mausrad nur mit Strg/⌘ (auch Trackpad-Pinch), sonst hängt man beim Scrollen der Seite in der Karte fest.
+      .filter((event) => (event.type === 'wheel' ? event.ctrlKey || event.metaKey : !event.button))
+      .on('zoom', (event) => g.setAttribute('transform', event.transform.toString()))
+    svg.call(z).on('dblclick.zoom', null)
+    zoomRef.current = z
+    return () => {
+      svg.on('.zoom', null)
+    }
+  }, [data])
+
+  function zoomBy(factor: number) {
+    if (svgRef.current && zoomRef.current) select(svgRef.current).call(zoomRef.current.scaleBy, factor)
+  }
+  function zoomReset() {
+    if (svgRef.current && zoomRef.current) select(svgRef.current).call(zoomRef.current.transform, zoomIdentity)
+  }
+  function focus(ags: string) {
+    setSelected(ags)
+    const b = data?.bounds(ags)
+    if (!b || !svgRef.current || !zoomRef.current) return
+    const [[x0, y0], [x1, y1]] = b
+    const k = Math.max(1, Math.min(24, 0.3 / Math.max((x1 - x0) / W, (y1 - y0) / H)))
+    const t = zoomIdentity.translate(W / 2 - (k * (x0 + x1)) / 2, H / 2 - (k * (y0 + y1)) / 2).scale(k)
+    select(svgRef.current).call(zoomRef.current.transform, t)
   }
 
-  function submitNewKommune() {
-    if (!pendingPos || !pendingName.trim()) return
-    startTransition(() => addKommune({ name: pendingName.trim(), posX: pendingPos.x, posY: pendingPos.y }))
-    setPendingPos(null)
-    setPendingName('')
-    setPlacing(false)
+  function onMapClick(e: MouseEvent<SVGSVGElement>) {
+    const ags = (e.target as Element).getAttribute('data-ags')
+    if (ags) setSelected(ags)
   }
+  function onMapMove(e: MouseEvent<SVGSVGElement>) {
+    const ags = (e.target as Element).getAttribute('data-ags')
+    const rect = wrapRef.current?.getBoundingClientRect()
+    if (!ags || !rect) return setHover(null)
+    setHover({ ags, x: e.clientX - rect.left, y: e.clientY - rect.top })
+  }
+
+  function save(input: KommuneInput) {
+    startTransition(async () => {
+      applyOptimistic({
+        type: 'save',
+        row: { ...input, status: input.status as KommuneStatus, notes: input.notes || null, updated_by: null, updated_at: new Date().toISOString() },
+      })
+      const res = await saveKommune(input)
+      if (res.error) alert(`Speichern fehlgeschlagen: ${res.error}`)
+    })
+  }
+  function reset(ags: string) {
+    startTransition(async () => {
+      applyOptimistic({ type: 'reset', ags })
+      const res = await resetKommune(ags)
+      if (res.error) alert(`Zurücksetzen fehlgeschlagen: ${res.error}`)
+    })
+    setSelected(null)
+  }
+
+  const counts = useMemo(() => {
+    const c = new Map<KommuneStatus, number>()
+    for (const r of rows) c.set(r.status, (c.get(r.status) ?? 0) + 1)
+    return c
+  }, [rows])
+
+  const selGem = selected ? data?.byAgs.get(selected) : undefined
+  const selRow = selected ? rowByAgs.get(selected) : undefined
+  const hoverGem = hover ? data?.byAgs.get(hover.ags) : undefined
+  const hoverRow = hover ? rowByAgs.get(hover.ags) : undefined
 
   return (
     <div className="card">
@@ -61,156 +218,250 @@ export default function KommunenKarte({ kommunen }: { kommunen: Kommune[] }) {
         {STATUS_ORDER.map((s) => (
           <span key={s}>
             <span className="dot" style={{ background: `var(--status-${s})` }} />
-            {STATUS_LABEL[s]}
+            {STATUS_LABEL[s]} <b>{counts.get(s) ?? 0}</b>
           </span>
         ))}
       </div>
 
-      <div className="map-toolbar">
-        {placing ? (
-          <span className="map-hint">Klick auf die Karte, um eine Kommune zu platzieren…</span>
-        ) : (
-          <span />
-        )}
-        <button className="btn" onClick={() => { setPlacing((p) => !p); setPendingPos(null) }}>
-          {placing ? 'Abbrechen' : '+ Kommune hinzufügen'}
-        </button>
-      </div>
-
-      <div className={`map-wrap${placing ? ' placing' : ''}`} onClick={handleMapClick}>
-        <img src="/germany.svg" alt="Deutschlandkarte" draggable={false} />
-        {kommunen.map((k) => (
-          <button
-            key={k.id}
-            className="pin"
-            style={{
-              left: `${k.pos_x * 100}%`,
-              top: `${k.pos_y * 100}%`,
-              background: `var(--status-${k.status})`,
-            }}
-            title={`${k.name} — ${STATUS_LABEL[k.status]}`}
-            onClick={(e) => {
-              e.stopPropagation()
-              setSelected(k)
-            }}
-          />
-        ))}
-        {pendingPos && (
-          <span
-            className="pin"
-            style={{ left: `${pendingPos.x * 100}%`, top: `${pendingPos.y * 100}%`, background: 'var(--accent)' }}
-          />
-        )}
-      </div>
-      <p className="map-attribution">Kartenumriss: svg-maps.com (CC BY 4.0)</p>
-
-      {pendingPos && (
-        <div className="overlay" onClick={() => setPendingPos(null)}>
-          <div className="panel" onClick={(e) => e.stopPropagation()}>
-            <h3>Neue Kommune</h3>
-            <div className="field">
-              <label htmlFor="new-kommune-name">Name</label>
-              <input
-                id="new-kommune-name"
-                autoFocus
-                value={pendingName}
-                onChange={(e) => setPendingName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && submitNewKommune()}
-              />
-            </div>
-            <div className="panel-actions">
-              <button className="btn link" onClick={() => setPendingPos(null)}>Abbrechen</button>
-              <button className="btn primary" onClick={submitNewKommune}>Anlegen</button>
+      <div className="map-layout">
+        <div className="map-col">
+          <div className="map-toolbar">
+            {data && <Suche gemeinden={data.gemeinden} onPick={focus} />}
+            <div className="zoom-buttons">
+              <button className="btn" onClick={() => zoomBy(1.8)} aria-label="Hineinzoomen">+</button>
+              <button className="btn" onClick={() => zoomBy(1 / 1.8)} aria-label="Herauszoomen">−</button>
+              <button className="btn" onClick={zoomReset}>Ganz</button>
             </div>
           </div>
-        </div>
-      )}
 
-      {selected && (
-        <DetailPanel
-          kommune={selected}
-          onClose={() => setSelected(null)}
-          onSaved={(patch) => {
-            startTransition(() => updateKommune(selected.id, patch))
-            setSelected(null)
-          }}
-          onDeleted={() => {
-            startTransition(() => deleteKommune(selected.id))
-            setSelected(null)
-          }}
-        />
+          <div className="map-wrap" ref={wrapRef}>
+            {!data && <p className="empty map-loading">Karte wird geladen…</p>}
+            <svg
+              ref={svgRef}
+              viewBox={`0 0 ${W} ${H}`}
+              className="map-svg"
+              onClick={onMapClick}
+              onMouseMove={onMapMove}
+              onMouseLeave={() => setHover(null)}
+            >
+              <g ref={gRef}>
+                {data && (
+                  <>
+                    <GemeindeFlaechen gemeinden={data.gemeinden} statusByAgs={statusByAgs} />
+                    <path className="kreis-borders" d={data.kreise} />
+                    <path className="land-borders" d={data.laender} />
+                    <path className="outline" d={data.outline} />
+                    {hoverGem && <path className="hover-outline" d={hoverGem.d} />}
+                    {selGem && <path className="sel-outline" d={selGem.d} />}
+                  </>
+                )}
+              </g>
+            </svg>
+            {hover && hoverGem && (
+              <div className="map-tooltip" style={{ left: hover.x + 14, top: hover.y + 14 }}>
+                <strong>{hoverGem.n}</strong>
+                <span>{hoverGem.k}</span>
+                {hoverRow && <span className="tt-status">{STATUS_LABEL[hoverRow.status]}</span>}
+              </div>
+            )}
+          </div>
+          <p className="map-hint-line">Zoomen: Plus/Minus oder Strg/⌘ + Mausrad · Verschieben: ziehen</p>
+        </div>
+
+        <aside className="map-side">
+          {selected && selGem ? (
+            <DetailForm
+              key={selected}
+              gemeinde={selGem}
+              row={selRow}
+              onSave={save}
+              onReset={() => reset(selected)}
+              onClose={() => setSelected(null)}
+            />
+          ) : (
+            <Uebersicht rows={rows} onPick={focus} />
+          )}
+        </aside>
+      </div>
+
+      <p className="map-attribution">
+        Gemeindegrenzen: ©{' '}
+        <a href="https://www.bkg.bund.de" target="_blank" rel="noreferrer">BKG</a> (2026){' '}
+        <a href="https://www.govdata.de/dl-de/by-2-0" target="_blank" rel="noreferrer">dl-de/by-2-0</a>,{' '}
+        <a href="https://sgx.geodatenzentrum.de/web_public/gdz/datenquellen/datenquellen_vg_nuts.pdf" target="_blank" rel="noreferrer">
+          Datenquellen
+        </a>{' '}
+        · vereinfacht dargestellt
+      </p>
+    </div>
+  )
+}
+
+function Suche({ gemeinden, onPick }: { gemeinden: Gemeinde[]; onPick: (ags: string) => void }) {
+  const [q, setQ] = useState('')
+  const results = useMemo(() => {
+    const n = norm(q.trim())
+    if (n.length < 2) return []
+    const starts = gemeinden.filter((g) => g.search.startsWith(n)).sort((a, b) => a.n.length - b.n.length)
+    const contains = gemeinden.filter((g) => !g.search.startsWith(n) && g.search.includes(n))
+    return [...starts, ...contains].slice(0, 8)
+  }, [q, gemeinden])
+
+  function pick(ags: string) {
+    onPick(ags)
+    setQ('')
+  }
+
+  return (
+    <div className="search">
+      <input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && results[0] && pick(results[0].a)}
+        placeholder="Gemeinde suchen…"
+        aria-label="Gemeinde suchen"
+      />
+      {results.length > 0 && (
+        <ul className="search-results">
+          {results.map((g) => (
+            <li key={g.a}>
+              <button onClick={() => pick(g.a)}>
+                <strong>{g.n}</strong> <span>{g.k}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   )
 }
 
-function DetailPanel({
-  kommune,
+function Uebersicht({ rows, onPick }: { rows: KommuneStatusRow[]; onPick: (ags: string) => void }) {
+  if (rows.length === 0) {
+    return (
+      <div className="side-empty">
+        <h3>Noch keine Kommunen markiert</h3>
+        <p>Such oben nach einer Gemeinde oder klick direkt auf die Karte, um einen Status zu setzen.</p>
+      </div>
+    )
+  }
+  return (
+    <div className="side-list">
+      {STATUS_ORDER.map((s) => {
+        const list = rows.filter((r) => r.status === s).sort((a, b) => a.name.localeCompare(b.name, 'de'))
+        if (list.length === 0) return null
+        return (
+          <div key={s} className="side-group">
+            <h3>
+              <span className="dot" style={{ background: `var(--status-${s})` }} />
+              {STATUS_LABEL[s]} <span>{list.length}</span>
+            </h3>
+            <ul>
+              {list.map((r) => (
+                <li key={r.ags}>
+                  <button onClick={() => onPick(r.ags)}>
+                    {r.name}
+                    {r.appointment_date && <span> · Termin {new Date(r.appointment_date).toLocaleDateString('de-DE')}</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function DetailForm({
+  gemeinde,
+  row,
+  onSave,
+  onReset,
   onClose,
-  onSaved,
-  onDeleted,
 }: {
-  kommune: Kommune
+  gemeinde: Gemeinde
+  row: KommuneStatusRow | undefined
+  onSave: (input: KommuneInput) => void
+  onReset: () => void
   onClose: () => void
-  onSaved: (patch: { status: KommuneStatus; notes: string; contact_date: string | null; appointment_date: string | null }) => void
-  onDeleted: () => void
 }) {
-  const [status, setStatus] = useState<KommuneStatus>(kommune.status)
-  const [notes, setNotes] = useState(kommune.notes ?? '')
-  const [contactDate, setContactDate] = useState(kommune.contact_date ?? '')
-  const [appointmentDate, setAppointmentDate] = useState(kommune.appointment_date ?? '')
+  const [status, setStatus] = useState<KommuneStatus>(row?.status ?? 'nicht_kontaktiert')
+  const [notes, setNotes] = useState(row?.notes ?? '')
+  const [contactDate, setContactDate] = useState(row?.contact_date ?? '')
+  const [appointmentDate, setAppointmentDate] = useState(row?.appointment_date ?? '')
 
   return (
-    <div className="overlay" onClick={onClose}>
-      <div className="panel" onClick={(e) => e.stopPropagation()}>
-        <h3>{kommune.name}</h3>
-
-        <div className="field">
-          <label htmlFor="status">Status</label>
-          <select id="status" value={status} onChange={(e) => setStatus(e.target.value as KommuneStatus)}>
-            {STATUS_ORDER.map((s) => (
-              <option key={s} value={s}>{STATUS_LABEL[s]}</option>
-            ))}
-          </select>
+    <div className="detail">
+      <div className="detail-head">
+        <div>
+          <h3>{gemeinde.n}</h3>
+          <p>
+            {gemeinde.b} · {gemeinde.k}
+          </p>
         </div>
-
-        <div className="field">
-          <label htmlFor="contact_date">Kontaktiert am</label>
-          <input id="contact_date" type="date" value={contactDate} onChange={(e) => setContactDate(e.target.value)} />
-        </div>
-
-        <div className="field">
-          <label htmlFor="appointment_date">Termin am</label>
-          <input id="appointment_date" type="date" value={appointmentDate} onChange={(e) => setAppointmentDate(e.target.value)} />
-        </div>
-
-        <div className="field">
-          <label htmlFor="notes">Notizen</label>
-          <textarea id="notes" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
-        </div>
-
-        <div className="panel-actions">
-          <button className="btn danger" onClick={() => { if (confirm(`${kommune.name} wirklich löschen?`)) onDeleted() }}>
-            Löschen
-          </button>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn link" onClick={onClose}>Abbrechen</button>
-            <button
-              className="btn primary"
-              onClick={() =>
-                onSaved({
-                  status,
-                  notes,
-                  contact_date: contactDate || null,
-                  appointment_date: appointmentDate || null,
-                })
-              }
-            >
-              Speichern
-            </button>
-          </div>
-        </div>
+        <button className="btn link" onClick={onClose} aria-label="Schließen">✕</button>
       </div>
+      {!row && <p className="detail-hint">Noch nicht erfasst.</p>}
+
+      <div className="status-picker" role="radiogroup" aria-label="Status">
+        {STATUS_ORDER.map((s) => (
+          <button
+            key={s}
+            role="radio"
+            aria-checked={status === s}
+            className={`status-chip${status === s ? ' active' : ''}`}
+            onClick={() => setStatus(s)}
+          >
+            <span className="dot" style={{ background: `var(--status-${s})` }} />
+            {STATUS_LABEL[s]}
+          </button>
+        ))}
+      </div>
+
+      <div className="field">
+        <label htmlFor="contact_date">Kontaktiert am</label>
+        <input id="contact_date" type="date" value={contactDate} onChange={(e) => setContactDate(e.target.value)} />
+      </div>
+      <div className="field">
+        <label htmlFor="appointment_date">Termin am</label>
+        <input id="appointment_date" type="date" value={appointmentDate} onChange={(e) => setAppointmentDate(e.target.value)} />
+      </div>
+      <div className="field">
+        <label htmlFor="notes">Notizen</label>
+        <textarea id="notes" rows={4} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </div>
+
+      <div className="panel-actions">
+        {row ? (
+          <button className="btn danger" onClick={() => confirm(`${gemeinde.n} von der Karte entfernen?`) && onReset()}>
+            Entfernen
+          </button>
+        ) : (
+          <span />
+        )}
+        <button
+          className="btn primary"
+          onClick={() =>
+            onSave({
+              ags: gemeinde.a,
+              name: gemeinde.n,
+              status,
+              notes,
+              contact_date: contactDate || null,
+              appointment_date: appointmentDate || null,
+            })
+          }
+        >
+          Speichern
+        </button>
+      </div>
+      {row?.updated_by && (
+        <p className="detail-meta">
+          Zuletzt geändert von {row.updated_by === 'marco' ? 'Marco' : 'Tobi'} am{' '}
+          {new Date(row.updated_at).toLocaleDateString('de-DE')}
+        </p>
+      )}
     </div>
   )
 }

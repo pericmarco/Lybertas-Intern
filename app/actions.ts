@@ -52,28 +52,42 @@ export async function deleteTodo(id: string) {
 
 // ── Kommunen ───────────────────────────────────────────
 
-export async function addKommune(input: { name: string; posX: number; posY: number }) {
-  const session = await verifySession()
-  if (!session) return
-  const name = input.name.trim()
-  if (!name) return
-  await db().from('kommunen').insert({ name, pos_x: input.posX, pos_y: input.posY })
-  revalidatePath('/')
+const STATUSES = ['nicht_kontaktiert', 'angeschrieben', 'termin_vereinbart', 'gespraech_gefuehrt', 'kunde', 'abgesagt']
+
+export type KommuneInput = {
+  ags: string
+  name: string
+  status: string
+  notes: string
+  contact_date: string | null
+  appointment_date: string | null
 }
 
-export async function updateKommune(
-  id: string,
-  patch: { status?: string; notes?: string; contact_date?: string | null; appointment_date?: string | null }
-) {
+export async function saveKommune(input: KommuneInput): Promise<{ error?: string }> {
   const session = await verifySession()
-  if (!session) return
-  await db().from('kommunen').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', id)
+  if (!session) return { error: 'Nicht angemeldet.' }
+  if (!/^\d{8}$/.test(input.ags) || !STATUSES.includes(input.status)) return { error: 'Ungültige Eingabe.' }
+
+  const { error } = await db().from('kommunen_status').upsert({
+    ags: input.ags,
+    name: input.name,
+    status: input.status,
+    notes: input.notes.trim() || null,
+    contact_date: input.contact_date || null,
+    appointment_date: input.appointment_date || null,
+    updated_by: session.name,
+    updated_at: new Date().toISOString(),
+  })
+  if (error) return { error: error.message }
   revalidatePath('/')
+  return {}
 }
 
-export async function deleteKommune(id: string) {
+export async function resetKommune(ags: string): Promise<{ error?: string }> {
   const session = await verifySession()
-  if (!session) return
-  await db().from('kommunen').delete().eq('id', id)
+  if (!session) return { error: 'Nicht angemeldet.' }
+  const { error } = await db().from('kommunen_status').delete().eq('ags', ags)
+  if (error) return { error: error.message }
   revalidatePath('/')
+  return {}
 }

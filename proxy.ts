@@ -24,5 +24,6 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|germany.svg).*)'],
+  // Öffentliche Dateien ohne Login-Prüfung: Tab-Icon und die (ohnehin frei verfügbaren) BKG-Gemeindegrenzen.
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|icon.svg|gemeinden.topo.json).*)'],
 }
