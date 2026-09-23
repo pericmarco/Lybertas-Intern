@@ -2,9 +2,13 @@ import 'server-only'
 import { SignJWT, jwtVerify } from 'jose'
 import { cookies } from 'next/headers'
 
-const secretKey = process.env.SESSION_SECRET
-if (!secretKey) throw new Error('SESSION_SECRET fehlt')
-const encodedKey = new TextEncoder().encode(secretKey)
+// Erst beim Aufruf lesen, nicht beim Laden des Moduls: Next.js lädt die Module
+// schon beim Build, und dort soll eine fehlende Variable den Build nicht abbrechen.
+function secretKey() {
+  const secret = process.env.SESSION_SECRET
+  if (!secret) throw new Error('SESSION_SECRET fehlt')
+  return new TextEncoder().encode(secret)
+}
 
 export type SessionPayload = { name: string }
 
@@ -13,12 +17,12 @@ export async function encrypt(payload: SessionPayload) {
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('30d')
-    .sign(encodedKey)
+    .sign(secretKey())
 }
 
 export async function decrypt(session: string | undefined = ''): Promise<SessionPayload | null> {
   try {
-    const { payload } = await jwtVerify(session, encodedKey, { algorithms: ['HS256'] })
+    const { payload } = await jwtVerify(session, secretKey(), { algorithms: ['HS256'] })
     if (typeof payload.name !== 'string') return null
     return { name: payload.name }
   } catch {
