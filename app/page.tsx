@@ -2,7 +2,7 @@ import { verifySession } from '@/app/lib/auth'
 import { db } from '@/app/lib/db'
 import { logout } from '@/app/actions'
 import TodoList, { type Todo } from '@/components/TodoList'
-import KommunenKarte, { type KommuneStatusRow } from '@/components/KommunenKarte'
+import KommunenKarte, { type KommuneStatusRow } from '@/components/karte/KommunenKarte'
 
 export default async function Dashboard() {
   const session = await verifySession()

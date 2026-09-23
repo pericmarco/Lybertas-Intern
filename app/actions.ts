@@ -67,7 +67,9 @@ export async function setTodoPriority(id: string, priority: string | null): Prom
 const STATUSES = ['nicht_kontaktiert', 'angeschrieben', 'termin_vereinbart', 'gespraech_gefuehrt', 'kunde', 'abgesagt']
 
 export type KommuneInput = {
+  // Gemeinde: 8-stelliger AGS · Verbund: 9-stelliger Gemeindeverbandsschlüssel
   ags: string
+  ebene: 'gemeinde' | 'verbund'
   name: string
   status: string
   notes: string
@@ -78,10 +80,12 @@ export type KommuneInput = {
 export async function saveKommune(input: KommuneInput): Promise<{ error?: string }> {
   const session = await verifySession()
   if (!session) return { error: 'Nicht angemeldet.' }
-  if (!/^\d{8}$/.test(input.ags) || !STATUSES.includes(input.status)) return { error: 'Ungültige Eingabe.' }
+  const keyOk = input.ebene === 'verbund' ? /^\d{9}$/.test(input.ags) : input.ebene === 'gemeinde' && /^\d{8}$/.test(input.ags)
+  if (!keyOk || !STATUSES.includes(input.status)) return { error: 'Ungültige Eingabe.' }
 
   const { error } = await db().from('kommunen_status').upsert({
     ags: input.ags,
+    ebene: input.ebene,
     name: input.name,
     status: input.status,
     notes: input.notes.trim() || null,
