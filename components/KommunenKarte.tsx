@@ -37,8 +37,8 @@ const STATUS_LABEL: Record<KommuneStatus, string> = {
 }
 const STATUS_ORDER = Object.keys(STATUS_LABEL) as KommuneStatus[]
 
-// a = AGS, n = Name, b = Bezeichnung (Stadt/Gemeinde/…), k = Landkreis
-type GemProps = { a: string; n: string; b: string; k: string }
+// a = AGS, n = Name, b = Bezeichnung (Stadt/Gemeinde/…), k = Landkreis, e = Einwohner (31.12.2024)
+type GemProps = { a: string; n: string; b: string; k: string; e?: number }
 type Gemeinde = GemProps & { d: string; search: string }
 type GemTopology = Topology<{ gem: GeometryCollection<GemProps> }>
 
@@ -55,8 +55,18 @@ const W = 800
 const H = 1080
 const MAX_ZOOM = 60
 
+const fmt = new Intl.NumberFormat('de-DE')
+function einwohner(e: number | undefined) {
+  return e == null ? '' : `${fmt.format(e)} Einwohner`
+}
+function einwohnerKurz(e: number) {
+  if (e >= 1_000_000) return `${(e / 1_000_000).toLocaleString('de-DE', { maximumFractionDigits: 2 })} Mio.`
+  if (e >= 10_000) return `${Math.round(e / 1000).toLocaleString('de-DE')} Tsd.`
+  return fmt.format(e)
+}
+
 function norm(s: string) {
-  return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss')
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss')
 }
 
 function useMapData(): MapData | null {
@@ -134,6 +144,10 @@ export default function KommunenKarte({ kommunen }: { kommunen: KommuneStatusRow
   const gRef = useRef<SVGGElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
+  const canHover = useRef(false)
+  useEffect(() => {
+    canHover.current = window.matchMedia('(hover: hover)').matches
+  }, [])
 
   const rowByAgs = useMemo(() => new Map(rows.map((r) => [r.ags, r])), [rows])
   const statusByAgs = useMemo(() => new Map(rows.map((r) => [r.ags, r.status])), [rows])
@@ -145,8 +159,13 @@ export default function KommunenKarte({ kommunen }: { kommunen: KommuneStatusRow
     const z = d3zoom<SVGSVGElement, unknown>()
       .scaleExtent([1, MAX_ZOOM])
       .translateExtent([[0, 0], [W, H]])
-      // Mausrad nur mit Strg/⌘ (auch Trackpad-Pinch), sonst hängt man beim Scrollen der Seite in der Karte fest.
-      .filter((event) => (event.type === 'wheel' ? event.ctrlKey || event.metaKey : !event.button))
+      // Mausrad nur mit Strg/⌘ (auch Trackpad-Pinch), Touch nur mit zwei Fingern — sonst hängt man
+      // beim Scrollen der Seite in der Karte fest. Ein Finger scrollt, Tippen wählt aus.
+      .filter((event) => {
+        if (event.type === 'wheel') return event.ctrlKey || event.metaKey
+        if (event.type.startsWith('touch')) return event.touches.length >= 2
+        return !event.button
+      })
       .on('zoom', (event) => g.setAttribute('transform', event.transform.toString()))
     svg.call(z).on('dblclick.zoom', null)
     zoomRef.current = z
@@ -176,6 +195,7 @@ export default function KommunenKarte({ kommunen }: { kommunen: KommuneStatusRow
     if (ags) setSelected(ags)
   }
   function onMapMove(e: MouseEvent<SVGSVGElement>) {
+    if (!canHover.current) return
     const ags = (e.target as Element).getAttribute('data-ags')
     const rect = wrapRef.current?.getBoundingClientRect()
     if (!ags || !rect) return setHover(null)
@@ -261,25 +281,32 @@ export default function KommunenKarte({ kommunen }: { kommunen: KommuneStatusRow
               <div className="map-tooltip" style={{ left: hover.x + 14, top: hover.y + 14 }}>
                 <strong>{hoverGem.n}</strong>
                 <span>{hoverGem.k}</span>
+                {hoverGem.e != null && <span>{einwohner(hoverGem.e)}</span>}
                 {hoverRow && <span className="tt-status">{STATUS_LABEL[hoverRow.status]}</span>}
               </div>
             )}
           </div>
-          <p className="map-hint-line">Zoomen: Plus/Minus oder Strg/⌘ + Mausrad · Verschieben: ziehen</p>
+          <p className="map-hint-line hint-mouse">Zoomen: Plus/Minus oder Strg/⌘ + Mausrad · Verschieben: ziehen</p>
+          <p className="map-hint-line hint-touch">Tippen wählt aus · Zoomen und Verschieben mit zwei Fingern oder Plus/Minus</p>
         </div>
 
-        <aside className="map-side">
-          {selected && selGem ? (
-            <DetailForm
-              key={selected}
-              gemeinde={selGem}
-              row={selRow}
-              onSave={save}
-              onReset={() => reset(selected)}
-              onClose={() => setSelected(null)}
-            />
-          ) : (
-            <Uebersicht rows={rows} onPick={focus} />
+        {/* Übersicht bleibt immer im Seitenfluss (sonst springt am Handy die Seite, wenn das
+            Formular als Blatt von unten aufgeht); am Desktop blendet CSS sie bei Auswahl aus. */}
+        <aside className={`map-side${selected && selGem ? ' has-selection' : ''}`}>
+          <div className="side-overview">
+            <Uebersicht rows={rows} onPick={focus} einwohnerVon={(ags) => data?.byAgs.get(ags)?.e} />
+          </div>
+          {selected && selGem && (
+            <div className="detail-panel">
+              <DetailForm
+                key={selected}
+                gemeinde={selGem}
+                row={selRow}
+                onSave={save}
+                onReset={() => reset(selected)}
+                onClose={() => setSelected(null)}
+              />
+            </div>
           )}
         </aside>
       </div>
@@ -291,7 +318,7 @@ export default function KommunenKarte({ kommunen }: { kommunen: KommuneStatusRow
         <a href="https://sgx.geodatenzentrum.de/web_public/gdz/datenquellen/datenquellen_vg_nuts.pdf" target="_blank" rel="noreferrer">
           Datenquellen
         </a>{' '}
-        · vereinfacht dargestellt
+        · vereinfacht dargestellt · Einwohner: Statistisches Bundesamt, Stand 31.12.2024
       </p>
     </div>
   )
@@ -326,7 +353,7 @@ function Suche({ gemeinden, onPick }: { gemeinden: Gemeinde[]; onPick: (ags: str
           {results.map((g) => (
             <li key={g.a}>
               <button onClick={() => pick(g.a)}>
-                <strong>{g.n}</strong> <span>{g.k}</span>
+                <strong>{g.n}</strong> <span>{g.k}{g.e != null && ` · ${einwohnerKurz(g.e)}`}</span>
               </button>
             </li>
           ))}
@@ -336,7 +363,15 @@ function Suche({ gemeinden, onPick }: { gemeinden: Gemeinde[]; onPick: (ags: str
   )
 }
 
-function Uebersicht({ rows, onPick }: { rows: KommuneStatusRow[]; onPick: (ags: string) => void }) {
+function Uebersicht({
+  rows,
+  onPick,
+  einwohnerVon,
+}: {
+  rows: KommuneStatusRow[]
+  onPick: (ags: string) => void
+  einwohnerVon: (ags: string) => number | undefined
+}) {
   if (rows.length === 0) {
     return (
       <div className="side-empty">
@@ -350,11 +385,13 @@ function Uebersicht({ rows, onPick }: { rows: KommuneStatusRow[]; onPick: (ags: 
       {STATUS_ORDER.map((s) => {
         const list = rows.filter((r) => r.status === s).sort((a, b) => a.name.localeCompare(b.name, 'de'))
         if (list.length === 0) return null
+        const summe = list.reduce((sum, r) => sum + (einwohnerVon(r.ags) ?? 0), 0)
         return (
           <div key={s} className="side-group">
             <h3>
               <span className="dot" style={{ background: `var(--status-${s})` }} />
               {STATUS_LABEL[s]} <span>{list.length}</span>
+              {summe > 0 && <span className="side-sum">{einwohnerKurz(summe)} Einwohner</span>}
             </h3>
             <ul>
               {list.map((r) => (
@@ -398,6 +435,12 @@ function DetailForm({
           <h3>{gemeinde.n}</h3>
           <p>
             {gemeinde.b} · {gemeinde.k}
+            {gemeinde.e != null && (
+              <>
+                <br />
+                {einwohner(gemeinde.e)}
+              </>
+            )}
           </p>
         </div>
         <button className="btn link" onClick={onClose} aria-label="Schließen">✕</button>
@@ -419,17 +462,19 @@ function DetailForm({
         ))}
       </div>
 
-      <div className="field">
-        <label htmlFor="contact_date">Kontaktiert am</label>
-        <input id="contact_date" type="date" value={contactDate} onChange={(e) => setContactDate(e.target.value)} />
-      </div>
-      <div className="field">
-        <label htmlFor="appointment_date">Termin am</label>
-        <input id="appointment_date" type="date" value={appointmentDate} onChange={(e) => setAppointmentDate(e.target.value)} />
+      <div className="date-row">
+        <div className="field">
+          <label htmlFor="contact_date">Kontaktiert am</label>
+          <input id="contact_date" type="date" value={contactDate} onChange={(e) => setContactDate(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="appointment_date">Termin am</label>
+          <input id="appointment_date" type="date" value={appointmentDate} onChange={(e) => setAppointmentDate(e.target.value)} />
+        </div>
       </div>
       <div className="field">
         <label htmlFor="notes">Notizen</label>
-        <textarea id="notes" rows={4} value={notes} onChange={(e) => setNotes(e.target.value)} />
+        <textarea id="notes" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
       </div>
 
       <div className="panel-actions">
