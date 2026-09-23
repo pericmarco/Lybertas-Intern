@@ -50,6 +50,18 @@ export async function deleteTodo(id: string) {
   revalidatePath('/')
 }
 
+const PRIORITIES = ['dringend', 'wichtig', 'spaeter']
+
+export async function setTodoPriority(id: string, priority: string | null): Promise<{ error?: string }> {
+  const session = await verifySession()
+  if (!session) return { error: 'Nicht angemeldet.' }
+  if (priority !== null && !PRIORITIES.includes(priority)) return { error: 'Ungültige Dringlichkeit.' }
+  const { error } = await db().from('todos').update({ priority }).eq('id', id)
+  if (error) return { error: error.message }
+  revalidatePath('/')
+  return {}
+}
+
 // ── Kommunen ───────────────────────────────────────────
 
 const STATUSES = ['nicht_kontaktiert', 'angeschrieben', 'termin_vereinbart', 'gespraech_gefuehrt', 'kunde', 'abgesagt']
