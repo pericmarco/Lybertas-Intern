@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useOptimistic, useRef, useTransition } from 'react'
+import { useMemo, useOptimistic, useRef, useSyncExternalStore, useTransition } from 'react'
 import { addTodo, toggleTodo, deleteTodo, setTodoPriority } from '@/app/actions'
 
 export type Priority = 'dringend' | 'wichtig' | 'spaeter'
@@ -53,6 +53,61 @@ function groupTodos(todos: Todo[]): Group[] {
   return [...groups.values()]
 }
 
+// Welche Gruppen aufgeklappt sind, merkt sich jeder Browser selbst. Der Speicher
+// im Modul ist die Quelle, localStorage nur die Ablage — fehlt es (privates
+// Fenster), klappt Auf/Zu trotzdem, nur eben ohne Erinnerung.
+const OFFEN_KEY = 'todo-gruppen-offen'
+const offenListeners = new Set<() => void>()
+let offenCache: string | null = null
+
+function offenSnapshot(): string {
+  if (offenCache === null) {
+    try {
+      offenCache = localStorage.getItem(OFFEN_KEY) ?? '[]'
+    } catch {
+      offenCache = '[]'
+    }
+  }
+  return offenCache
+}
+
+function saveOffen(names: string[]) {
+  offenCache = JSON.stringify(names)
+  try {
+    localStorage.setItem(OFFEN_KEY, offenCache)
+  } catch {}
+  offenListeners.forEach((l) => l())
+}
+
+function subscribeOffen(l: () => void) {
+  offenListeners.add(l)
+  return () => {
+    offenListeners.delete(l)
+  }
+}
+
+function useOffeneGruppen() {
+  // Server und erster Client-Render: alles zu — danach der gemerkte Stand.
+  const raw = useSyncExternalStore(subscribeOffen, offenSnapshot, () => '[]')
+  const offen = useMemo(() => {
+    try {
+      const list = JSON.parse(raw)
+      return new Set<string>(Array.isArray(list) ? list : [])
+    } catch {
+      return new Set<string>()
+    }
+  }, [raw])
+  function setOffen(names: Iterable<string>, open: boolean) {
+    const next = new Set(offen)
+    for (const n of names) {
+      if (open) next.add(n)
+      else next.delete(n)
+    }
+    saveOffen([...next])
+  }
+  return [offen, setOffen] as const
+}
+
 type Change =
   | { type: 'add'; todo: Todo }
   | { type: 'toggle'; id: string; done: boolean }
@@ -72,6 +127,8 @@ export default function TodoList({ todos }: { todos: Todo[] }) {
   const groups = useMemo(() => groupTodos(items), [items])
   const openTotal = items.filter((t) => !t.done).length
   const urgentTotal = items.filter((t) => !t.done && t.priority === 'dringend').length
+  const [offen, setOffen] = useOffeneGruppen()
+  const alleOffen = groups.length > 0 && groups.every((g) => offen.has(g.name))
 
   function changePriority(id: string, value: string) {
     const priority = (value || null) as Priority | null
@@ -91,6 +148,8 @@ export default function TodoList({ todos }: { todos: Todo[] }) {
           const text = String(formData.get('text') ?? '').trim()
           if (!text) return
           apply({ type: 'add', todo: { id: `neu-${Date.now()}`, text, done: false, priority: null, created_by: null, created_at: new Date().toISOString() } })
+          // Die Gruppe des neuen Todos aufklappen, damit man es sofort sieht.
+          setOffen([splitGroup(text).group], true)
           formRef.current?.reset()
           await addTodo(formData)
         }}
@@ -111,66 +170,88 @@ export default function TodoList({ todos }: { todos: Todo[] }) {
 
       {items.length === 0 && <p className="empty">Keine Todos.</p>}
       {items.length > 0 && (
-        <p className="todo-summary">
-          {openTotal} offen
-          {urgentTotal > 0 && <strong className="urgent"> · {urgentTotal} dringend</strong>} · {items.length - openTotal} erledigt
-        </p>
+        <div className="todo-summary">
+          <span>
+            {openTotal} offen
+            {urgentTotal > 0 && <strong className="urgent"> · {urgentTotal} dringend</strong>} · {items.length - openTotal} erledigt
+          </span>
+          <button
+            type="button"
+            className="btn link"
+            onClick={() => setOffen(groups.map((g) => g.name), !alleOffen)}
+          >
+            {alleOffen ? 'Alle zuklappen' : 'Alle aufklappen'}
+          </button>
+        </div>
       )}
 
-      {groups.map((g) => (
-        <div key={g.name} className="todo-group">
-          <h3 className="todo-group-title">
-            {g.name}{' '}
-            <span>
-              {g.open > 0 ? `${g.open} offen` : 'alles erledigt'}
-              {g.urgent > 0 && <strong className="urgent"> · {g.urgent} dringend</strong>}
-            </span>
-          </h3>
-          <div className="todo-list">
-            {g.items.map((t) => {
-              const p = t.priority ?? null
-              return (
-                <div key={t.id} className={`todo-item${t.done ? ' done' : ''}`}>
-                  <label className={`prio-dot prio-${p ?? 'keine'}`} title={`Dringlichkeit: ${p ? PRIORITY_LABEL[p] : 'nicht eingeordnet'}`}>
-                    <select aria-label="Dringlichkeit" value={p ?? ''} onChange={(e) => changePriority(t.id, e.target.value)}>
-                      <option value="">Nicht eingeordnet</option>
-                      {PRIORITY_ORDER.map((o) => (
-                        <option key={o} value={o}>
-                          {PRIORITY_LABEL[o]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <input
-                    type="checkbox"
-                    checked={t.done}
-                    onChange={(e) => {
-                      const done = e.target.checked
-                      startTransition(async () => {
-                        apply({ type: 'toggle', id: t.id, done })
-                        await toggleTodo(t.id, done)
-                      })
-                    }}
-                  />
-                  <span>{t.label}</span>
-                  <button
-                    className="del"
-                    aria-label="Löschen"
-                    onClick={() =>
-                      startTransition(async () => {
-                        apply({ type: 'delete', id: t.id })
-                        await deleteTodo(t.id)
-                      })
-                    }
-                  >
-                    ✕
-                  </button>
-                </div>
-              )
-            })}
-          </div>
+      {groups.length > 0 && (
+        <div className="todo-groups">
+          {groups.map((g) => (
+            <details
+              key={g.name}
+              className="todo-group"
+              open={offen.has(g.name)}
+              onToggle={(e) => {
+                const open = e.currentTarget.open
+                if (open !== offen.has(g.name)) setOffen([g.name], open)
+              }}
+            >
+              <summary className="todo-group-head">
+                <span className="chev" aria-hidden="true" />
+                <span className="todo-group-name">{g.name}</span>
+                <span className="todo-group-meta">
+                  {g.urgent > 0 && <strong className="urgent">{g.urgent} dringend · </strong>}
+                  {g.open > 0 ? `${g.open} offen` : 'alles erledigt'}
+                </span>
+              </summary>
+              <div className="todo-list">
+                {g.items.map((t) => {
+                  const p = t.priority ?? null
+                  return (
+                    <div key={t.id} className={`todo-item${t.done ? ' done' : ''}`}>
+                      <label className={`prio-dot prio-${p ?? 'keine'}`} title={`Dringlichkeit: ${p ? PRIORITY_LABEL[p] : 'nicht eingeordnet'}`}>
+                        <select aria-label="Dringlichkeit" value={p ?? ''} onChange={(e) => changePriority(t.id, e.target.value)}>
+                          <option value="">Nicht eingeordnet</option>
+                          {PRIORITY_ORDER.map((o) => (
+                            <option key={o} value={o}>
+                              {PRIORITY_LABEL[o]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <input
+                        type="checkbox"
+                        checked={t.done}
+                        onChange={(e) => {
+                          const done = e.target.checked
+                          startTransition(async () => {
+                            apply({ type: 'toggle', id: t.id, done })
+                            await toggleTodo(t.id, done)
+                          })
+                        }}
+                      />
+                      <span>{t.label}</span>
+                      <button
+                        className="del"
+                        aria-label="Löschen"
+                        onClick={() =>
+                          startTransition(async () => {
+                            apply({ type: 'delete', id: t.id })
+                            await deleteTodo(t.id)
+                          })
+                        }
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </details>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   )
 }
