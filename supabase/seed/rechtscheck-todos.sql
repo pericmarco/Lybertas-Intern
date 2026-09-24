@@ -52,6 +52,10 @@ from (values
 
   (35, 'Vertrieb: Kommunen nicht per Werbe-Mail kalt anschreiben (§ 7 UWG) — Brief oder individuelle Anfrage', 'dringend'),
   (36, 'Vertrieb: Politiker-/Partei-Funktionen für Kommunen-Instanzen abschaltbar machen (Neutralitätsgebot)', 'wichtig'),
-  (37, 'Vertrieb: Keine bezahlten Partei-Umfragen, bevor die EU-Verordnung zu politischer Werbung (2024/900) umgesetzt ist', 'spaeter')
+  (37, 'Vertrieb: Keine bezahlten Partei-Umfragen, bevor die EU-Verordnung zu politischer Werbung (2024/900) umgesetzt ist', 'spaeter'),
+
+  (38, 'Datenschutz: Videos behalten ihre Metadaten (evtl. GPS) — beim Hochladen entfernen oder serverseitig umwandeln', 'wichtig'),
+  (39, 'Datenschutz: Autor-ID der Forderung und Nutzer-ID im Foto-Pfad sind weiter öffentlich (pseudonym) — ausblenden', 'wichtig'),
+  (40, 'Code: Übergangs-Weg in lib/positions.ts entfernen, sobald Migration 044 eingespielt ist', 'spaeter')
 ) as t(n, text, prio)
 where not exists (select 1 from public.todos x where x.text = t.text);
